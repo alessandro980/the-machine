@@ -1,70 +1,57 @@
 /**
- * Home Page - The Machine Main Interface
- * Combines boot sequence, HUD overlay, navigation sidebar, and all view panels
- * Includes sound effects integration
+ * Home Page - The Machine
+ * Main surveillance system interface with privacy disclaimer
  */
-import { useState, useCallback, useEffect } from 'react';
-import { useMachine } from '@/contexts/MachineContext';
-import { useSoundEffects } from '@/hooks/useSoundEffects';
-import HUDOverlay from '@/components/HUDOverlay';
-import NavigationSidebar from '@/components/NavigationSidebar';
-import SurveillanceView from '@/components/SurveillanceView';
-import DatabaseView from '@/components/DatabaseView';
-import MapTrackingView from '@/components/MapTrackingView';
-import TimelineView from '@/components/TimelineView';
+import { useState, useEffect } from 'react';
 import BootSequence from '@/components/BootSequence';
-import { Volume2, VolumeX } from 'lucide-react';
+import PrivacyDisclaimerModal from '@/components/PrivacyDisclaimerModal';
+import HUDOverlay from '@/components/HUDOverlay';
 
 export default function Home() {
-  const { activeView } = useMachine();
-  const [booted, setBooted] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
-  const { playBoot, setEnabled } = useSoundEffects();
+  const [bootComplete, setBootComplete] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [showDisclaimer, setShowDisclaimer] = useState(true);
 
-  const handleBootComplete = useCallback(() => {
-    setBooted(true);
+  useEffect(() => {
+    // Check if user has already accepted privacy terms
+    const accepted = localStorage.getItem('machine_privacy_accepted') === 'true';
+    if (accepted) {
+      setPrivacyAccepted(true);
+      setShowDisclaimer(false);
+    }
   }, []);
 
-  // Play boot sound when boot sequence starts
-  useEffect(() => {
-    if (!booted) {
-      // Small delay to ensure AudioContext is ready after user interaction
-      const timer = setTimeout(() => {
-        playBoot();
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [booted, playBoot]);
-
-  const toggleSound = () => {
-    const newState = !soundEnabled;
-    setSoundEnabled(newState);
-    setEnabled(newState);
+  const handleBootComplete = () => {
+    setBootComplete(true);
   };
+
+  const handlePrivacyAccept = () => {
+    setPrivacyAccepted(true);
+    setShowDisclaimer(false);
+  };
+
+  const handlePrivacyReject = () => {
+    // Redirect to a safe page or show message
+    window.location.href = 'about:blank';
+  };
+
+  if (!bootComplete) {
+    return <BootSequence onComplete={handleBootComplete} />;
+  }
 
   return (
     <>
-      {!booted && <BootSequence onComplete={handleBootComplete} />}
-      <HUDOverlay>
-        <div className="flex h-full">
-          <NavigationSidebar />
-          <div className="flex-1 overflow-hidden relative">
-            {activeView === 'surveillance' && <SurveillanceView />}
-            {activeView === 'database' && <DatabaseView />}
-            {activeView === 'map' && <MapTrackingView />}
-            {activeView === 'timeline' && <TimelineView />}
+      {/* Privacy Disclaimer Modal */}
+      {showDisclaimer && (
+        <PrivacyDisclaimerModal onAccept={handlePrivacyAccept} onReject={handlePrivacyReject} />
+      )}
 
-            {/* Sound toggle */}
-            <button
-              onClick={toggleSound}
-              className="absolute top-2 right-3 z-30 p-1.5 text-machine-white/20 hover:text-machine-white/50 transition-colors"
-              title={soundEnabled ? 'Mute sounds' : 'Enable sounds'}
-            >
-              {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-      </HUDOverlay>
+      {/* Main HUD Interface */}
+      {privacyAccepted && (
+        <HUDOverlay>
+          <div />
+        </HUDOverlay>
+      )}
     </>
   );
 }
