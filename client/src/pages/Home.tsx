@@ -6,6 +6,7 @@ import { useState, useEffect } from 'react';
 import BootSequence from '@/components/BootSequence';
 import PrivacyDisclaimerModal from '@/components/PrivacyDisclaimerModal';
 import HUDOverlay from '@/components/HUDOverlay';
+import { WebcamDebugger } from '@/components/WebcamDebugger';
 
 export default function Home() {
   const [bootComplete, setBootComplete] = useState(false);
@@ -41,6 +42,9 @@ export default function Home() {
 
   return (
     <>
+      {/* Webcam Debugger */}
+      <WebcamDebugger />
+
       {/* Privacy Disclaimer Modal */}
       {showDisclaimer && (
         <PrivacyDisclaimerModal onAccept={handlePrivacyAccept} onReject={handlePrivacyReject} />

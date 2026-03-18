@@ -1,12 +1,14 @@
 /**
  * useFaceDetection Hook
  * Manages webcam stream, face-api.js model loading, and real-time face detection
+ * Includes auto-learning with face descriptor storage and matching
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as faceapi from 'face-api.js';
 import { nanoid } from 'nanoid';
 import type { DetectedFace, Person, Classification } from '@/lib/types';
 import { MODEL_URL } from '@/lib/types';
+import { addDescriptor, findBestMatch, getPersonDescriptors } from '@/lib/faceDescriptorStorage';
 
 interface UseFaceDetectionOptions {
   persons: Person[];
@@ -65,16 +67,26 @@ export function useFaceDetection({ persons, onFacesDetected, onStatusChange }: U
     return () => { cancelled = true; };
   }, []);
 
-  // Build face descriptors for known persons
+  // Build face descriptors for known persons and load from storage
   const buildDescriptors = useCallback(async () => {
     const descs: { person: Person; descriptor: Float32Array }[] = [];
+    
+    // Load descriptors from storage for known persons
     for (const person of personsRef.current) {
-      if (person.photoUrl) {
+      const storedDescs = getPersonDescriptors(person.id);
+      for (const stored of storedDescs) {
+        descs.push({ person, descriptor: new Float32Array(stored.descriptor) });
+      }
+      
+      // Also try to extract from photo if available
+      if (person.photoUrl && storedDescs.length === 0) {
         try {
           const img = await faceapi.fetchImage(person.photoUrl);
           const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
           if (detection) {
             descs.push({ person, descriptor: detection.descriptor });
+            // Save to storage for future use
+            addDescriptor(Array.from(detection.descriptor), person.id);
           }
         } catch (e) {
           // Skip persons whose photos can't be processed
@@ -98,41 +110,96 @@ export function useFaceDetection({ persons, onFacesDetected, onStatusChange }: U
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-      });
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-        setIsCameraOn(true);
-        setError(null);
-        onStatusChange({ modelsLoaded: true, camerasActive: 1 });
+      // Check if browser supports getUserMedia
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setError('Your browser does not support camera access. Please use Chrome, Firefox, Safari, or Edge.');
+        return;
       }
+
+      // Request camera permissions with fallback options
+      const constraints = {
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'user',
+        },
+        audio: false,
+      };
+
+      console.log('Requesting camera access with constraints:', constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      if (!videoRef.current) {
+        console.error('Video ref not available');
+        setError('Video element not ready. Please refresh the page.');
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+
+      // Set up video element
+      videoRef.current.srcObject = stream;
+      streamRef.current = stream;
+
+      // Ensure video plays
+      videoRef.current.onloadedmetadata = () => {
+        console.log('Video metadata loaded:', {
+          width: videoRef.current?.videoWidth,
+          height: videoRef.current?.videoHeight,
+        });
+        videoRef.current?.play().catch(err => {
+          console.error('Video play error:', err);
+          setError('Failed to play video stream. Please try again.');
+        });
+      };
+
+      setIsCameraOn(true);
+      setError(null);
+      onStatusChange({ modelsLoaded: true, camerasActive: 1 });
+      console.log('Camera started successfully');
     } catch (err) {
-      console.error('Camera access denied:', err);
-      setError('Camera access denied. Please allow camera permissions.');
+      console.error('Camera access error:', err);
+      const errorMessage = err instanceof DOMException
+        ? err.name === 'NotAllowedError'
+          ? 'Camera permission denied. Please allow camera access in your browser settings.'
+          : err.name === 'NotFoundError'
+          ? 'No camera found. Please connect a camera device.'
+          : err.name === 'NotReadableError'
+          ? 'Camera is already in use by another application. Please close other apps using the camera.'
+          : `Camera error: ${err.message}`
+        : 'Failed to access camera. Please check your browser permissions.';
+      setError(errorMessage);
     }
   }, [isModelLoaded, onStatusChange]);
 
   // Stop camera
   const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => {
+          track.stop();
+          console.log('Stopped track:', track.kind);
+        });
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      cancelAnimationFrame(animFrameRef.current);
+      setIsCameraOn(false);
+      onFacesDetected([]);
+      onStatusChange({ modelsLoaded: isModelLoaded, camerasActive: 0 });
+      console.log('Camera stopped successfully');
+    } catch (err) {
+      console.error('Error stopping camera:', err);
     }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    cancelAnimationFrame(animFrameRef.current);
-    setIsCameraOn(false);
-    onFacesDetected([]);
-    onStatusChange({ modelsLoaded: isModelLoaded, camerasActive: 0 });
   }, [isModelLoaded, onFacesDetected, onStatusChange]);
 
   // Face detection loop
   useEffect(() => {
-    if (!isCameraOn || !isModelLoaded || !videoRef.current) return;
+    if (!isCameraOn || !isModelLoaded || !videoRef.current) {
+      console.log('Face detection skipped:', { isCameraOn, isModelLoaded, hasVideoRef: !!videoRef.current });
+      return;
+    }
 
     let lastDetectionTime = 0;
     const DETECTION_INTERVAL = 150; // ms between detections
@@ -149,6 +216,16 @@ export function useFaceDetection({ persons, onFacesDetected, onStatusChange }: U
       lastDetectionTime = now;
 
       try {
+        // Ensure video is playing
+        if (video.paused) {
+          console.log('Video was paused, attempting to play');
+          try {
+            await video.play();
+          } catch (playErr) {
+            console.error('Play error:', playErr);
+          }
+        }
+
         const detections = await faceapi
           .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
           .withFaceLandmarks()
@@ -168,15 +245,28 @@ export function useFaceDetection({ persons, onFacesDetected, onStatusChange }: U
           let matchedPerson: Person | undefined;
           let bestDistance = 1;
 
-          // Try to match with known persons
-          if (det.descriptor && descriptorsRef.current.length > 0) {
-            for (const { person, descriptor } of descriptorsRef.current) {
-              const distance = faceapi.euclideanDistance(det.descriptor, descriptor);
-              if (distance < bestDistance && distance < 0.6) {
-                bestDistance = distance;
-                matchedPerson = person;
+          // Try to match with known persons from storage
+          if (det.descriptor) {
+            const match = findBestMatch(Array.from(det.descriptor));
+            if (match && match.personId) {
+              // Find the person object
+              matchedPerson = personsRef.current.find(p => p.id === match.personId);
+              bestDistance = match.distance;
+            }
+            
+            // Also check against loaded descriptors as fallback
+            if (!matchedPerson && descriptorsRef.current.length > 0) {
+              for (const { person, descriptor } of descriptorsRef.current) {
+                const distance = faceapi.euclideanDistance(det.descriptor, descriptor);
+                if (distance < bestDistance && distance < 0.6) {
+                  bestDistance = distance;
+                  matchedPerson = person;
+                }
               }
             }
+            
+            // Auto-save new face descriptor for learning
+            addDescriptor(Array.from(det.descriptor), matchedPerson?.id);
           }
 
           // Determine classification
